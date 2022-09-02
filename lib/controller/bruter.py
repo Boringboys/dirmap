@@ -3,9 +3,9 @@
 
 '''
 @Author: xxlin
-@LastEditors: xxlin
+@LastEditors: ttttmr
 @Date: 2019-03-14 09:49:05
-@LastEditTime: 2019-05-23 14:49:27
+@LastEditTime: 2019-09-08 12:34:26
 '''
 
 import configparser
@@ -84,6 +84,7 @@ def loadConf():
     conf.recursive_scan = eval(ConfigFileParser().recursive_scan())
     conf.recursive_scan_max_url_length = eval(ConfigFileParser().recursive_scan_max_url_length())
     conf.recursive_status_code = eval(ConfigFileParser().recursive_status_code())
+    conf.recursive_blacklist_exts = eval(ConfigFileParser().recursive_blacklist_exts())
     conf.exclude_subdirs = eval(ConfigFileParser().exclude_subdirs())
 
     conf.dict_mode = eval(ConfigFileParser().dict_mode())
@@ -140,15 +141,22 @@ def recursiveScan(response_url,all_payloads):
     '''
     if not conf.recursive_scan:
         return
+    # 当前url后缀在黑名单内，不进行递归
+    if response_url.split('.')[-1].lower() in conf.recursive_blacklist_exts:
+        return
     #XXX:payloads字典要固定格式
     for payload in all_payloads:
         #判断是否排除。若在排除的目录列表中，则排除。self.excludeSubdirs排除的列表，配置文件中，形如:/test、/test1
         if payload in [directory for directory in conf.exclude_subdirs]:
             return
-        #payload容错，添加正斜杠前缀
-        if not payload.startswith('/'):
-            payload = '/' + payload
-        #拼接payload，限制长度，并入队tasks
+        #payload拼接，处理/重复或缺失
+        if response_url.endswith('/') and payload.startswith('/'):
+            # /重复，url和payload都有/，删去payload的/前缀
+            payload = payload[1:]
+        elif (not response_url.endswith('/')) and (not payload.startswith('/')):
+            # /缺失，url和payload都不包含/，在payload前追加/
+            payload = '/'+payload
+        #拼接payload，限制url长度，入队tasks
         newpayload=response_url+payload
         if(len(newpayload) < int(conf.recursive_scan_max_url_length)):
             tasks.all_task.put(response_url + payload)
@@ -372,7 +380,7 @@ def scanModeHandler():
                         headers[k] = v
                 except Exception as e:
                     outputscreen.error("[x] Check personalized headers format: header=value,header=value.\n[x] error:{}".format(e))
-                    sys.exit()
+                    # sys.exit()
             #自定义ua
             if conf.request_header_ua:
                 headers['User-Agent'] = conf.request_header_ua
@@ -381,42 +389,35 @@ def scanModeHandler():
                 headers['Cookie'] = conf.request_header_cookie
             try:
                 response = requests.get(conf.url, headers=headers, timeout=conf.request_timeout, verify=False, allow_redirects=conf.redirection_302, proxies=conf.proxy_server)
-            except requests.exceptions.ConnectionError as e:
+                #获取页面url
+                if (response.status_code in conf.response_status_code) and response.text:
+                    html = etree.HTML(response.text)
+                    #加载自定义xpath用于解析html
+                    urls = html.xpath(conf.crawl_mode_parse_html)
+                    for url in urls:
+                        #去除相似url
+                        if urlSimilarCheck(url):
+                            #判断:1.是否同域名 2.netloc是否为空(值空时为同域)。若满足1或2，则添加到temp payload
+                            if (urllib.parse.urlparse(url).netloc == urllib.parse.urlparse(conf.url).netloc) or urllib.parse.urlparse(url).netloc == '':
+                                payloads.crawl_mode_dynamic_fuzz_temp_dict.add(url)
+                payloads.crawl_mode_dynamic_fuzz_temp_dict = payloads.crawl_mode_dynamic_fuzz_temp_dict - {'#', ''}
+                if conf.crawl_mode_dynamic_fuzz:
+                    #加载动态fuzz后缀，TODO:独立动态生成字典模块
+                    loadSuffix(os.path.join(paths.DATA_PATH,conf.crawl_mode_dynamic_fuzz_suffix))
+                    #生成新爬虫动态字典
+                    for i in payloads.crawl_mode_dynamic_fuzz_temp_dict:
+                        payloads.crawl_mode_dynamic_fuzz_dict.extend(generateCrawlDict(i))
+                    for i in payloads.crawl_mode_dynamic_fuzz_temp_dict:
+                        payloads.crawl_mode_dynamic_fuzz_dict.append(urllib.parse.urlparse(i).path)
+                    payloadlists.extend(set(payloads.crawl_mode_dynamic_fuzz_dict))
+                else:
+                    for i in payloads.crawl_mode_dynamic_fuzz_temp_dict:
+                        payloads.crawl_mode_dynamic_fuzz_dict.append(urllib.parse.urlparse(i).path)
+                    payloadlists.extend(set(payloads.crawl_mode_dynamic_fuzz_dict))
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ReadTimeout) as e:
                 outputscreen.error("[x] Crawler network connection error!plz check whether the target is accessible")
-                sys.exit()
+                # sys.exit()
 
-            #获取页面url
-            if response.status_code in conf.response_status_code:
-                try:
-                    contentDecode = response.content.decode('utf-8')
-                except UnicodeDecodeError:
-                    try:
-                        contentDecode = response.content.decode('gbk')
-                    except:
-                        outputscreen.error("[x] Unrecognized page coding errors")
-                html = etree.HTML(contentDecode)
-                #加载自定义xpath用于解析html
-                urls = html.xpath(conf.crawl_mode_parse_html)
-                for url in urls:
-                    #去除相似url
-                    if urlSimilarCheck(url):
-                        #判断:1.是否同域名 2.netloc是否为空(值空时为同域)。若满足1或2，则添加到temp payload
-                        if (urllib.parse.urlparse(url).netloc == urllib.parse.urlparse(conf.url).netloc) or urllib.parse.urlparse(url).netloc == '':
-                            payloads.crawl_mode_dynamic_fuzz_temp_dict.add(url)
-            payloads.crawl_mode_dynamic_fuzz_temp_dict = payloads.crawl_mode_dynamic_fuzz_temp_dict - {'#', ''}
-            if conf.crawl_mode_dynamic_fuzz:
-                #加载动态fuzz后缀，TODO:独立动态生成字典模块
-                loadSuffix(os.path.join(paths.DATA_PATH,conf.crawl_mode_dynamic_fuzz_suffix))
-                #生成新爬虫动态字典
-                for i in payloads.crawl_mode_dynamic_fuzz_temp_dict:
-                    payloads.crawl_mode_dynamic_fuzz_dict.extend(generateCrawlDict(i))
-                for i in payloads.crawl_mode_dynamic_fuzz_temp_dict:
-                    payloads.crawl_mode_dynamic_fuzz_dict.append(urllib.parse.urlparse(i).path)
-                payloadlists.extend(set(payloads.crawl_mode_dynamic_fuzz_dict))
-            else:
-                for i in payloads.crawl_mode_dynamic_fuzz_temp_dict:
-                    payloads.crawl_mode_dynamic_fuzz_dict.append(urllib.parse.urlparse(i).path)
-                payloadlists.extend(set(payloads.crawl_mode_dynamic_fuzz_dict))
     if payloadlists:
         return payloadlists
     else:
@@ -429,7 +430,7 @@ def responseHandler(response):
     @param {type}
     @return:
     '''
-    #3结果处理阶段
+    #结果处理阶段
     try:
         size = intToSize(int(response.headers['content-length']))
     except (KeyError, ValueError):
@@ -447,7 +448,7 @@ def responseHandler(response):
     if response.status_code in conf.response_status_code:
         msg = '[{}]'.format(str(response.status_code))
         if conf.response_header_content_type:
-            msg += '[{}]'.format(response.headers['content-type'])
+            msg += '[{}]'.format(response.headers.get('content-type'))
         if conf.response_size:
             msg += '[{}] '.format(str(size))
         msg += response.url
@@ -461,9 +462,10 @@ def responseHandler(response):
             recursiveScan(response.url,payloads.all_payloads)
 
     #自定义正则匹配响应
-    pattern = re.compile(conf.custom_response_page)
-    if pattern.search(response.content.decode('utf-8')):
-        outputscreen.info('[!] Custom response information matched\n[!] use regular expression:{}\n[!] matched page:{}'.format(conf.custom_response_page,response.text))
+    if conf.custom_response_page:
+        pattern = re.compile(conf.custom_response_page)
+        if pattern.search(response.text):
+            outputscreen.info('[!] Custom response information matched\n[!] use regular expression:{}\n[!] matched page:{}'.format(conf.custom_response_page,response.text))
 
 def worker():
     '''
@@ -505,7 +507,7 @@ def worker():
         #outputscreen.error('[x] timeout! url:{}'.format(payloads.current_payload))
         pass
     except Exception as e:
-        #outputscreen.error('[x] error:{}'.format(e))
+        # outputscreen.error('[x] error:{}'.format(e))
         pass
     finally:
         #更新进度条
