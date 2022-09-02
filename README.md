@@ -6,6 +6,8 @@
  -->
 # dirmap
 
+高级个屁
+
 一个高级web目录扫描工具，功能将会强于DirBuster、Dirsearch、cansina、御剑
 
 ![dirmap](doc/dirmap.png)
